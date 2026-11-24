@@ -25,6 +25,7 @@ jobs:
       TAG: ${{ inputs.tag }}
     steps:
       - name: Validate draft release and uploaded assets
+        id: validate
         shell: bash
         run: |
           set -euo pipefail
@@ -32,14 +33,33 @@ jobs:
             echo "Expected a stable version tag, e.g. v1.2.3" >&2
             exit 1
           fi
-          gh release view "$TAG" --json tagName,isDraft,isPrerelease,assets > "$RUNNER_TEMP/momentcut-release.json"
-          jq -e --arg tag "$TAG" '
-            .tagName == $tag and .isDraft and (.isPrerelease | not)
-            and (.assets | length > 0 and all(.[]; .state == "uploaded" and .size > 0))
-            and any(.assets[]; .name | test("\\.(exe|msi|msix|msixbundle|dmg|pkg|AppImage|deb|rpm|zip|tar\\.gz|tar\\.xz|nupkg|apk)$"; "i"))
-          ' "$RUNNER_TEMP/momentcut-release.json" > /dev/null
+
+          release_id=$(gh api --paginate --slurp "repos/$GH_REPO/releases?per_page=100" |
+            jq -er --arg tag "$TAG" '
+              [.[][] | select(.tag_name == $tag)] |
+              if length == 1 and .[0].draft == true and .[0].prerelease == false
+              then .[0].id
+              else error("Expected exactly one stable draft release matching the tag")
+              end
+            ')
+
+          gh api --paginate --slurp "repos/$GH_REPO/releases/$release_id/assets?per_page=100" |
+            jq -e '
+              [.[][]] |
+              length > 0 and
+              all(.[]; .state == "uploaded" and .size > 0 and
+                ((.digest // "") | test("^sha256:[0-9a-fA-F]{64}$"))) and
+              any(.[]; .name | test("\\.(exe|msi|msix|msixbundle|dmg|pkg|AppImage|deb|rpm|zip|tar\\.gz|tar\\.xz|nupkg|apk)$"; "i"))
+            ' > /dev/null
+
+          printf 'release_id=%s\n' "$release_id" >> "$GITHUB_OUTPUT"
+
       - name: Publish validated release
         shell: bash
+        env:
+          RELEASE_ID: ${{ steps.validate.outputs.release_id }}
         run: |
           set -euo pipefail
+          gh api "repos/$GH_REPO/releases/$RELEASE_ID" |
+            jq -e --arg tag "$TAG" '.tag_name == $tag and .draft == true and .prerelease == false' > /dev/null
           gh release edit "$TAG" --draft=false
