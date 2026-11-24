@@ -1,0 +1,45 @@
+name: Publish MomentCut release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing draft release tag (vMAJOR.MINOR.PATCH)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: momentcut-release-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Validate draft release and uploaded assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Expected a stable version tag, e.g. v1.2.3" >&2
+            exit 1
+          fi
+          gh release view "$TAG" --json tagName,isDraft,isPrerelease,assets > "$RUNNER_TEMP/momentcut-release.json"
+          jq -e --arg tag "$TAG" '
+            .tagName == $tag and .isDraft and (.isPrerelease | not)
+            and (.assets | length > 0 and all(.[]; .state == "uploaded" and .size > 0))
+            and any(.assets[]; .name | test("\\.(exe|msi|msix|msixbundle|dmg|pkg|AppImage|deb|rpm|zip|tar\\.gz|tar\\.xz|nupkg|apk)$"; "i"))
+          ' "$RUNNER_TEMP/momentcut-release.json" > /dev/null
+      - name: Publish validated release
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" --draft=false
